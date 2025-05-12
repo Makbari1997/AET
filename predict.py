@@ -10,34 +10,38 @@ from sklearn import metrics
 from sklearn.metrics import roc_auc_score
 
 
-from data_modules.dataloader import DataLoader
 from data_modules.data_utils import *
+from data_modules.dataloader import DataLoader
 
-from model.train import compute_loss
 from model.vae import *
-from model.model_utils import *
 from model.encoder import *
+from model.model_utils import *
+from model.train import compute_loss
 
 from utils import *
 
 
-def ensemble_predict(
-    classifier, tokenizer, losses, sentences, threshold_dict, alpha, max_length
+def adaptive_alpha(probs):
+    """
+    Calculate an adaptive alpha based on the classifier's probability distribution
+
+    When classifier is very confident (high max prob), we rely more on the classifier
+    When classifier is uncertain (low max prob), we rely more on the VAE
+    """
+    # Calculate entropy of the probability distribution
+    entropy = -np.sum(probs * np.log(probs + 1e-10))
+    max_entropy = -np.log(1.0 / len(probs))  # Maximum possible entropy
+    normalized_entropy = entropy / max_entropy
+
+    # Calculate adaptive alpha - higher entropy means lower alpha (rely more on VAE)
+    return 0.8 * (1 - normalized_entropy) + 0.2
+
+
+def ensemble_predict_adaptive(
+    classifier, tokenizer, losses, sentences, threshold_dict, max_length
 ):
     """
-    Enhanced prediction using both classifier confidence and reconstruction loss
-
-    Args:
-        classifier: The fine-tuned BERT classifier
-        tokenizer: BERT tokenizer
-        losses: List of reconstruction losses
-        sentences: List of input sentences
-        threshold_dict: Dictionary mapping class IDs to thresholds
-        alpha: Weight for combining classifier confidence and reconstruction loss
-        max_length: Maximum sequence length
-
-    Returns:
-        List of predicted labels
+    Enhanced prediction using adaptive alpha
     """
     labels = []
     ood_scores = []
@@ -51,6 +55,9 @@ def ensemble_predict(
         # Get maximum probability and predicted class
         max_prob = np.max(probs)
         predicted_class = np.argmax(probs)
+
+        # Calculate adaptive alpha
+        alpha = adaptive_alpha(probs)
 
         # Calculate ensemble score
         ood_score = alpha * (1 - max_prob) + (1 - alpha) * loss
@@ -68,6 +75,72 @@ def ensemble_predict(
             labels.append(predicted_class)
 
     return labels, ood_scores
+
+
+def ensemble_predict(
+    classifier,
+    tokenizer,
+    losses,
+    sentences,
+    threshold_dict,
+    alpha,
+    max_length,
+    ensemble_method="fixed",
+):
+    """
+    Enhanced prediction using both classifier confidence and reconstruction loss
+
+    Args:
+        classifier: The fine-tuned BERT classifier
+        tokenizer: BERT tokenizer
+        losses: List of reconstruction losses
+        sentences: List of input sentences
+        threshold_dict: Dictionary mapping class IDs to thresholds
+        alpha: Fixed alpha value (used when ensemble_method is "fixed")
+        max_length: Maximum sequence length
+        ensemble_method: One of "fixed", "adaptive"
+
+    Returns:
+        List of predicted labels
+    """
+    labels = []
+    ood_scores = []
+    alphas_used = []  # Store alphas used for analysis
+
+    for loss, sen in zip(losses, sentences):
+        # Get classifier output
+        inputs = __predict_preprocess__(sen, tokenizer, max_length)
+        logits = classifier.predict(inputs)[0]
+        probs = tf.nn.softmax(logits, axis=1).numpy()[0]
+
+        # Get maximum probability and predicted class
+        max_prob = np.max(probs)
+        predicted_class = np.argmax(probs)
+
+        # Determine alpha based on method
+        if ensemble_method == "adaptive":
+            current_alpha = adaptive_alpha(probs)
+        else:  # fixed
+            current_alpha = alpha
+
+        alphas_used.append(current_alpha)
+
+        # Calculate ensemble score
+        ood_score = current_alpha * (1 - max_prob) + (1 - current_alpha) * loss
+        ood_scores.append(ood_score)
+
+        # Get threshold for predicted class
+        threshold = threshold_dict.get(
+            predicted_class, np.mean(list(threshold_dict.values()))
+        )
+
+        # Make prediction
+        if ood_score > threshold:
+            labels.append(len(threshold_dict))  # OOD class
+        else:
+            labels.append(predicted_class)
+
+    return labels, ood_scores, alphas_used
 
 
 def fit_evt_models(
@@ -332,6 +405,8 @@ def run(config):
         )
     )
 
+    print("------------------------------------------------------------------")
+
     print('------------------------------------------------------------------')
     
     # Calculate losses for dev, test, and ood sets
@@ -348,107 +423,224 @@ def run(config):
     normalized_test_loss = normalize(test_loss, path=os.path.join('artifacts', config['dataset']), mode='eval')
     normalized_ood_loss = normalize(ood_loss, path=os.path.join('artifacts', config['dataset']), mode='eval')
     
-    print('------------------------------------------------------------------')
-    print('Finding optimal alpha parameter...')
-    # Use development set and a portion of OOD data to find optimal alpha
-    ood_val_size = min(len(dev_sentences), len(ood_sentences) // 2)
-    ood_val_losses = normalized_ood_loss[:ood_val_size]
-    ood_val_sentences = ood_sentences[:ood_val_size]
-    
-    optimal_alpha = find_optimal_alpha(
-        classifier, tokenizer, 
-        normalized_dev_loss, dev_sentences, [in_lbl_2_indx[i] for i in dev_intents],
-        ood_val_losses, ood_val_sentences, max_length
-    )
-    
-    print('------------------------------------------------------------------')
-    print('Fitting EVT models for class-specific thresholds...')
-    
-    # Get true class indices for development set
-    dev_class_indices = [in_lbl_2_indx[i] for i in dev_intents]
-    
-    # Fit EVT models and get thresholds
-    thresholds, evt_models = fit_evt_models(
-        classifier, tokenizer, normalized_dev_loss, dev_sentences, 
-        dev_class_indices, max_length, fpr=0.05
-    )
-    
-    # Save EVT models and thresholds
-    evt_path = os.path.join('artifacts', config['dataset'], 'evt')
-    os.makedirs(evt_path, exist_ok=True)
-    
-    with open(os.path.join(evt_path, 'thresholds.pkl'), 'wb') as f:
-        pickle.dump(thresholds, f)
-    
-    with open(os.path.join(evt_path, 'evt_models.pkl'), 'wb') as f:
-        pickle.dump(evt_models, f)
-    
-    print(f'Class-specific thresholds: {thresholds}')
-    
-    print('------------------------------------------------------------------')
-    print('Evaluating on test and OOD data...')
-    
-    # Combine test and remaining OOD data for evaluation
-    ood_test_size = len(ood_sentences) - ood_val_size
-    ood_test_losses = normalized_ood_loss[ood_val_size:]
-    ood_test_sentences = ood_sentences[ood_val_size:]
-    
-    eval_losses = normalized_test_loss + ood_test_losses
-    eval_sentences = test_sentences + ood_test_sentences
-    
-    # Make predictions using ensemble approach
-    y_pred_multiclass, ood_scores = ensemble_predict(
-        classifier, tokenizer, eval_losses, eval_sentences, 
-        thresholds, optimal_alpha, max_length
-    )
-    
-    y_true_multiclass = [in_lbl_2_indx[i] for i in test_intents] + [len(in_lbl_2_indx)] * len(ood_test_sentences)
-    
-    # For binary classification (in-domain vs OOD)
-    y_true_binary = [0] * len(test_sentences) + [1] * len(ood_test_sentences)
-    y_pred_binary = [0 if y < len(in_lbl_2_indx) else 1 for y in y_pred_multiclass]
-    
-    # Calculate metrics
-    print('alpha : {}'.format(optimal_alpha))
-    print('----------------------------------')
-    print('multi class macro f1 : {}'.format(np.round(metrics.f1_score(y_true_multiclass, y_pred_multiclass, average='macro'), 4)))
-    print('multi class micro f1 : {}'.format(np.round(metrics.f1_score(y_true_multiclass, y_pred_multiclass, average='micro'), 4)))
-    print('\n')
-    print('binary class macro f1 : {}'.format(np.round(metrics.f1_score(y_true_binary, y_pred_binary, average='macro'), 4)))
-    print('binary class micro f1 : {}'.format(np.round(metrics.f1_score(y_true_binary, y_pred_binary, average='micro'), 4)))
-    print('AUC-ROC : {}'.format(np.round(metrics.roc_auc_score(y_true_binary, ood_scores), 4)))
-    
-    # Save visualization of ensemble scores
-    plt.figure(figsize=(10, 6))
-    plt.hist([ood_scores[:len(test_sentences)], ood_scores[len(test_sentences):]], 
-             bins=30, alpha=0.7, label=['In-domain', 'OOD'])
-    plt.xlabel('Ensemble Score')
-    plt.ylabel('Count')
-    plt.title('Distribution of Ensemble Scores (alpha={:.2f})'.format(optimal_alpha))
-    plt.legend()
-    plt.savefig(os.path.join('artifacts', config['dataset'], 'ensemble_scores.png'))
-    
-    print('------------------------------------------------------------------')
-    
-    # Add analysis for each class
-    class_metrics = {}
-    for cls in set(y_true_multiclass):
-        if cls == len(in_lbl_2_indx):  # Skip OOD class
-            continue
+    # Check if we're using the ensemble approach
+    if config.get('use_ensemble', False):
+        print('------------------------------------------------------------------')
+        print(f"Using ensemble approach with method: {config.get('ensemble_method', 'fixed')}")
+        
+        # Get dev class indices for EVT modeling
+        dev_class_indices = [in_lbl_2_indx[i] for i in dev_intents]
+        
+        # Collect classifier probabilities for dev set
+        dev_probs = []
+        for sen in dev_sentences:
+            inputs = __predict_preprocess__(sen, tokenizer, max_length)
+            logits = classifier.predict(inputs)[0]
+            dev_probs.append(tf.nn.softmax(logits, axis=1).numpy()[0])
+        
+        # Determine alpha value
+        alpha = config.get('initial_alpha', 0.5)
+        
+        if config.get('optimize_alpha', True) and config.get('ensemble_method', 'fixed') == 'fixed':
+            print('Finding optimal alpha parameter...')
+            # Use development set and a portion of OOD data to find optimal alpha
+            ood_val_size = min(len(dev_sentences), len(ood_sentences) // 2)
+            ood_val_losses = normalized_ood_loss[:ood_val_size]
+            ood_val_sentences = ood_sentences[:ood_val_size]
             
-        # Calculate precision, recall, and F1 for this class
-        y_true_class = [1 if y == cls else 0 for y in y_true_multiclass]
-        y_pred_class = [1 if y == cls else 0 for y in y_pred_multiclass]
+            # Collect probabilities for OOD validation set
+            ood_val_probs = []
+            for sen in ood_val_sentences:
+                inputs = __predict_preprocess__(sen, tokenizer, max_length)
+                logits = classifier.predict(inputs)[0]
+                ood_val_probs.append(tf.nn.softmax(logits, axis=1).numpy()[0])
+            
+            # Find optimal alpha
+            best_alpha = 0.5
+            best_auc = 0
+            
+            for alpha_test in np.arange(0.1, 1.0, 0.1):
+                dev_scores = []
+                ood_scores = []
+                
+                # Calculate scores for in-domain validation data
+                for loss, prob in zip(normalized_dev_loss, dev_probs):
+                    max_prob = np.max(prob)
+                    ood_score = alpha_test * (1 - max_prob) + (1 - alpha_test) * loss
+                    dev_scores.append(ood_score)
+                
+                # Calculate scores for OOD validation data
+                for loss, prob in zip(ood_val_losses, ood_val_probs):
+                    max_prob = np.max(prob)
+                    ood_score = alpha_test * (1 - max_prob) + (1 - alpha_test) * loss
+                    ood_scores.append(ood_score)
+                
+                # Create binary labels (0 for in-domain, 1 for OOD)
+                y_true = [0] * len(dev_scores) + [1] * len(ood_scores)
+                y_score = dev_scores + ood_scores
+                
+                # Calculate AUC-ROC
+                auc = roc_auc_score(y_true, y_score)
+                print(f"Alpha: {alpha_test:.1f}, AUC-ROC: {auc:.4f}")
+                
+                if auc > best_auc:
+                    best_auc = auc
+                    best_alpha = alpha_test
+            
+            print(f"Best alpha: {best_alpha}, Best AUC-ROC: {best_auc:.4f}")
+            alpha = best_alpha
         
-        precision = metrics.precision_score(y_true_class, y_pred_class)
-        recall = metrics.recall_score(y_true_class, y_pred_class)
-        f1 = metrics.f1_score(y_true_class, y_pred_class)
+        print('------------------------------------------------------------------')
+        print('Fitting EVT models for class-specific thresholds...')
         
-        class_metrics[cls] = {'precision': precision, 'recall': recall, 'f1': f1}
-    
-    print('Per-class metrics:')
-    for cls, scores in class_metrics.items():
-        print(f'Class {cls}: Precision={scores["precision"]:.4f}, Recall={scores["recall"]:.4f}, F1={scores["f1"]:.4f}')
+        # Prepare data for EVT modeling
+        class_scores = {}
+        
+        for i, (loss, prob, cls) in enumerate(zip(normalized_dev_loss, dev_probs, dev_class_indices)):
+            # Get maximum probability
+            max_prob = np.max(prob)
+            
+            # Calculate ensemble score with current alpha (fixed or optimal)
+            if config.get('ensemble_method', 'fixed') == 'adaptive':
+                curr_alpha = adaptive_alpha(prob)
+            else:
+                curr_alpha = alpha
+                
+            ood_score = curr_alpha * (1 - max_prob) + (1 - curr_alpha) * loss
+            
+            if cls not in class_scores:
+                class_scores[cls] = []
+            
+            class_scores[cls].append(ood_score)
+        
+        # Fit EVT models for each class
+        thresholds = {}
+        evt_models = {}
+        
+        for cls, scores in class_scores.items():
+            # Fit GEV distribution
+            scores_array = np.array(scores)
+            shape, loc, scale = stats.genextreme.fit(-scores_array)
+            evt_models[cls] = (shape, loc, scale)
+            
+            # Calculate threshold based on desired FPR
+            fpr = config.get('evt_fpr', 0.05)
+            threshold = -stats.genextreme.ppf(1 - fpr, shape, loc, scale)
+            thresholds[cls] = threshold
+        
+        # Save EVT models and thresholds
+        evt_path = os.path.join('artifacts', config['dataset'], 'evt')
+        os.makedirs(evt_path, exist_ok=True)
+        
+        with open(os.path.join(evt_path, 'thresholds.pkl'), 'wb') as f:
+            pickle.dump(thresholds, f)
+        
+        with open(os.path.join(evt_path, 'evt_models.pkl'), 'wb') as f:
+            pickle.dump(evt_models, f)
+        
+        print(f'Class-specific thresholds: {thresholds}')
+        
+        print('------------------------------------------------------------------')
+        print('Evaluating on test and OOD data...')
+        
+        # Collect test probabilities
+        test_probs = []
+        for sen in test_sentences:
+            inputs = __predict_preprocess__(sen, tokenizer, max_length)
+            logits = classifier.predict(inputs)[0]
+            test_probs.append(tf.nn.softmax(logits, axis=1).numpy()[0])
+        
+        # Collect OOD probabilities (excluding validation portion if used)
+        ood_test_size = len(ood_sentences)
+        if config.get('optimize_alpha', True):
+            ood_test_size = len(ood_sentences) - min(len(dev_sentences), len(ood_sentences) // 2)
+        
+        ood_test_losses = normalized_ood_loss[-ood_test_size:]
+        ood_test_sentences = ood_sentences[-ood_test_size:]
+        
+        ood_test_probs = []
+        for sen in ood_test_sentences:
+            inputs = __predict_preprocess__(sen, tokenizer, max_length)
+            logits = classifier.predict(inputs)[0]
+            ood_test_probs.append(tf.nn.softmax(logits, axis=1).numpy()[0])
+        
+        # Combine test and OOD data
+        eval_losses = np.concatenate([normalized_test_loss, ood_test_losses])
+        eval_sentences = test_sentences + ood_test_sentences
+        eval_probs = test_probs + ood_test_probs
+        
+        # Make predictions using ensemble approach
+        y_pred_multiclass, ood_scores, alphas_used = ensemble_predict(
+            classifier, tokenizer, eval_losses, eval_sentences, 
+            thresholds, alpha, max_length, 
+            ensemble_method=config.get('ensemble_method', 'fixed')
+        )
+        
+        y_true_multiclass = [in_lbl_2_indx[i] for i in test_intents] + [len(in_lbl_2_indx)] * len(ood_test_sentences)
+        
+        # For binary classification (in-domain vs OOD)
+        y_true_binary = [0] * len(test_sentences) + [1] * len(ood_test_sentences)
+        y_pred_binary = [0 if y < len(in_lbl_2_indx) else 1 for y in y_pred_multiclass]
+        
+        # Calculate metrics
+        if config.get('ensemble_method', 'fixed') == 'fixed':
+            print(f'Fixed alpha : {alpha:.4f}')
+        else:
+            print(f'Adaptive alpha - Average: {np.mean(alphas_used):.4f}, Min: {np.min(alphas_used):.4f}, Max: {np.max(alphas_used):.4f}')
+            
+        print('----------------------------------')
+        print(f'Multi class macro f1 : {metrics.f1_score(y_true_multiclass, y_pred_multiclass, average="macro"):.4f}')
+        print(f'Multi class micro f1 : {metrics.f1_score(y_true_multiclass, y_pred_multiclass, average="micro"):.4f}')
+        print('\n')
+        print(f'Binary class macro f1 : {metrics.f1_score(y_true_binary, y_pred_binary, average="macro"):.4f}')
+        print(f'Binary class micro f1 : {metrics.f1_score(y_true_binary, y_pred_binary, average="micro"):.4f}')
+        print(f'AUC-ROC : {metrics.roc_auc_score(y_true_binary, ood_scores):.4f}')
+        
+        # Save visualization of ensemble scores
+        plt.figure(figsize=(10, 6))
+        plt.hist([ood_scores[:len(test_sentences)], ood_scores[len(test_sentences):]], 
+                bins=30, alpha=0.7, label=['In-domain', 'OOD'])
+        plt.xlabel('Ensemble Score')
+        plt.ylabel('Count')
+        if config.get('ensemble_method', 'fixed') == 'fixed':
+            plt.title(f'Distribution of Ensemble Scores (fixed alpha={alpha:.2f})')
+        else:
+            plt.title(f'Distribution of Ensemble Scores (adaptive alpha)')
+        plt.legend()
+        plt.savefig(os.path.join('artifacts', config['dataset'], 'ensemble_scores.png'))
+        
+        # Create comprehensive visualization
+        create_analysis_visualizations(
+            normalized_test_loss, test_probs,
+            ood_test_losses, ood_test_probs,
+            alpha if config.get('ensemble_method', 'fixed') == 'fixed' else np.mean(alphas_used),
+            os.path.join('artifacts', config['dataset'])
+        )
+        
+    else:
+        # Original implementation without ensemble
+        eval_loss = normalized_test_loss + normalized_ood_loss
+        eval_sentences = test_sentences + ood_sentences
+
+        visualize(normalized_test_loss, os.path.join('artifacts', config['dataset'], 'vae_loss_for_{}_test.png'.format(config['dataset'])))
+        visualize(normalized_ood_loss, os.path.join('artifacts', config['dataset'], 'vae_loss_for_{}_ood.png'.format(config['dataset'])))
+
+        y_pred_multiclass = predict(classifier, tokenizer, eval_loss, eval_sentences, config['ood_threshold'], len(in_lbl_2_indx), max_length)
+        y_true_multiclass = [in_lbl_2_indx[i] for i in test_intents] + [len(in_lbl_2_indx)] * len(ood_sentences)
+
+        y_true_binary = [0 for i in range(len(test_sentences))] + [1 for i in range(len(ood_sentences))]
+        y_pred_binary = [0 if i <= config['ood_threshold'] else 1 for i in eval_loss]
+
+        print('threshold : {}'.format(config['ood_threshold']))
+        print('----------------------------------')
+        print('multi class macro f1 : {}'.format(np.round(metrics.f1_score(y_true_multiclass, y_pred_multiclass, average='macro'), 4)))
+        print('multi class micro f1 : {}'.format(np.round(metrics.f1_score(y_true_multiclass, y_pred_multiclass, average='micro'), 4)))
+        print('\n')
+        print('binary class macro f1 : {}'.format(np.round(metrics.f1_score(y_true_binary, y_pred_binary, average='macro'), 4)))
+        print('binary class micro f1 : {}'.format(np.round(metrics.f1_score(y_true_binary, y_pred_binary, average='micro'), 4)))
+        
+    print('------------------------------------------------------------------')
+
 
 if __name__ == "__main__":
     config_file = open("./config.json")
