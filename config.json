@@ -1,0 +1,29 @@
+{
+    "dataset": "snips",
+    "bert": "bert-base-uncased",
+    "vector_dim": 768,
+    "latent_dim": 32,
+    "seq_length": "max",
+    "finetune": true,
+    "finetune_epochs": 60,
+    "train_epochs": 100,
+    "batch_size": 16,
+    "vae_learning_rate": 0.001,
+    "encoder": [
+        521,
+        256,
+        128
+    ],
+    "decoder": [
+        128,
+        256,
+        521,
+        768
+    ],
+    "activation": "tanh",
+    "use_ensemble": true,
+    "ensemble_method": "adaptive",
+    "initial_alpha": 0.5,
+    "evt_fpr": 0.05,
+    "optimize_alpha": true
+}
