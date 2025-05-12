@@ -21,9 +21,10 @@
         768
     ],
     "activation": "tanh",
-    "use_ensemble": true,
-    "ensemble_method": "adaptive",
-    "initial_alpha": 0.5,
+    "use_ensemble": false,
+    "use_evt_vae": true,
     "evt_fpr": 0.05,
-    "optimize_alpha": true
+    "tail_fraction": 0.2,
+    "min_tail_size": 30,
+    "fixed_threshold": 0.2
 }
