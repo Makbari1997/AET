@@ -1,5 +1,9 @@
 import os
 import json
+import random
+import numpy as np
+import tensorflow as tf
+
 from pathlib import Path
 
 from data_modules.data_utils import *
@@ -14,6 +18,14 @@ from utils import *
 
 import warnings
 warnings.filterwarnings("ignore")
+SEED = 1
+os.environ['PYTHONHASHSEED'] = str(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+tf.keras.utils.set_random_seed(SEED)
+tf.config.experimental.enable_op_determinism()
+
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 

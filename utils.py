@@ -158,7 +158,7 @@ def evt_vae_only(
     # Apply the threshold for binary classification
     y_true_binary = [0] * len(test_losses) + [1] * len(ood_losses)
     y_pred_binary = [
-        0 if loss <= evt_threshold else 1 for loss in test_losses + ood_losses
+        0 if loss <= evt_threshold else 1 for loss in np.concatenate([test_losses, ood_losses])
     ]
 
     # Calculate metrics
@@ -176,7 +176,7 @@ def evt_vae_only(
 
     for threshold in np.arange(0.05, 1.0, 0.05):
         y_pred_fixed = [
-            0 if loss <= threshold else 1 for loss in test_losses + ood_losses
+            0 if loss <= threshold else 1 for loss in np.concatenate([test_losses, ood_losses])
         ]
         f1 = metrics.f1_score(y_true_binary, y_pred_fixed, average="macro")
 
@@ -186,7 +186,7 @@ def evt_vae_only(
 
     # Results with best fixed threshold
     y_pred_best_fixed = [
-        0 if loss <= best_threshold else 1 for loss in test_losses + ood_losses
+        0 if loss <= best_threshold else 1 for loss in np.concatenate([test_losses,ood_losses])
     ]
     fixed_f1_macro = metrics.f1_score(y_true_binary, y_pred_best_fixed, average="macro")
     fixed_f1_micro = metrics.f1_score(y_true_binary, y_pred_best_fixed, average="micro")
