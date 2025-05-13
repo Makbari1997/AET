@@ -19,45 +19,6 @@ def __finetune_preprocess__(x, y, model_name, batch_size, max_length):
     return tf.data.Dataset.from_tensor_slices((x_tokenized, y)).batch(batch_size)
 
 
-def create_lr_scheduler(
-    initial_lr=2e-5, warmup_proportion=0.1, decay_steps=None, end_lr=1e-6, power=1.0
-):
-    """
-    Create a learning rate scheduler with warmup and polynomial decay.
-
-    Args:
-        initial_lr: Initial learning rate
-        warmup_proportion: Proportion of training to perform warmup for
-        decay_steps: Number of steps for the decay (usually num_train_steps - num_warmup_steps)
-        end_lr: Final learning rate after decay
-        power: Power factor for polynomial decay
-
-    Returns:
-        A learning rate schedule function
-    """
-
-    def lr_scheduler(step):
-        step = tf.cast(step, tf.float32)
-        warmup_steps = tf.cast(warmup_proportion * decay_steps, tf.float32)
-
-        # Warmup phase
-        warmup_lr = initial_lr * (step / warmup_steps)
-
-        # Decay phase
-        decay_progress = tf.clip_by_value(
-            (step - warmup_steps) / (decay_steps - warmup_steps), 0.0, 1.0
-        )
-        decay_factor = (1.0 - decay_progress) ** power
-        decay_lr = end_lr + (initial_lr - end_lr) * decay_factor
-
-        # Use warmup_lr for warmup phase, decay_lr for decay phase
-        lr = tf.cond(step < warmup_steps, lambda: warmup_lr, lambda: decay_lr)
-
-        return lr
-
-    return lr_scheduler
-
-
 def finetune(
     x_train,
     y_train,
@@ -68,7 +29,7 @@ def finetune(
     path,
     model_name="bert-base-uncased",
     lr=3e-5,  # Slightly higher initial learning rate
-    num_epochs=80,
+    num_epochs=60,
     batch_size=16,
     first_layers_to_freeze=10,
     patience=10,  # Early stopping patience
@@ -96,21 +57,32 @@ def finetune(
 
         # Calculate learning rate schedule parameters
         num_train_steps = (len(x_train) // batch_size) * num_epochs
-        decay_steps = num_train_steps  # Full schedule over all steps
-        end_lr = lr * end_lr_factor
 
-        # Create learning rate scheduler
-        lr_schedule = create_lr_scheduler(
-            initial_lr=lr,
-            warmup_proportion=warmup_proportion,
-            decay_steps=decay_steps,
-            end_lr=end_lr,
-            power=1.0,  # Linear decay
+        # Use TF 2.8 compatible learning rate schedule
+        warmup_steps = int(warmup_proportion * num_train_steps)
+
+        # Create learning rate schedule - TF 2.8 compatible
+        lr_schedule = tf.keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=lr,
+            decay_steps=num_train_steps - warmup_steps,
+            end_learning_rate=lr * end_lr_factor,
+            power=1.0,
         )
 
-        # Create optimizer with LR schedule
+        # Create a wrapper function for the learning rate schedule with warmup
+        def lr_with_warmup(step):
+            step = tf.cast(step, tf.float32)
+            if step < warmup_steps:
+                # Linear warmup
+                warmup_pct = step / tf.cast(warmup_steps, tf.float32)
+                return tf.cast(warmup_pct * lr, tf.float32)
+            else:
+                # Use polynomial decay after warmup
+                return lr_schedule(step - warmup_steps)
+
+        # Create optimizer with custom learning rate function
         optimizer = tf.keras.optimizers.Adam(
-            learning_rate=lr_schedule, beta_1=0.9, beta_2=0.999, epsilon=1e-8
+            learning_rate=lr_with_warmup, beta_1=0.9, beta_2=0.999, epsilon=1e-8
         )
 
         # Compile the model
@@ -119,6 +91,20 @@ def finetune(
             loss=tf.keras.losses.CategoricalCrossentropy(from_logits=True),
             metrics=[f1_m, tf.keras.metrics.CategoricalAccuracy()],
         )
+
+        # Create a custom learning rate logger callback
+        class LRLogger(tf.keras.callbacks.Callback):
+            def on_epoch_begin(self, epoch, logs=None):
+                # Get current step
+                step = epoch * (len(x_train) // batch_size)
+                # Calculate current LR using our function
+                current_lr = lr_with_warmup(step)
+                if isinstance(current_lr, tf.Tensor):
+                    current_lr = current_lr.numpy()
+                print(f"\nEpoch {epoch+1}: Current learning rate: {current_lr:.8f}")
+
+        # Create directory for the path if it doesn't exist
+        os.makedirs(os.path.dirname(path), exist_ok=True)
 
         # Create callbacks
         callbacks = [
@@ -140,16 +126,16 @@ def finetune(
                 mode="max",
                 restore_best_weights=True,
             ),
-            # Reduce learning rate when training plateaus (backup to scheduler)
+            # Reduce learning rate when training plateaus (TF 2.8 compatible version)
             tf.keras.callbacks.ReduceLROnPlateau(
                 monitor="val_f1_m",
                 factor=0.5,
-                patience=patience // 2,  # Half the patience of early stopping
+                patience=patience // 2,
                 verbose=1,
                 mode="max",
                 min_delta=min_delta,
                 cooldown=2,
-                min_lr=end_lr / 10,
+                min_lr=lr * end_lr_factor / 10,
             ),
             # Log training progress
             tf.keras.callbacks.CSVLogger(
@@ -157,18 +143,14 @@ def finetune(
                 separator=",",
                 append=False,
             ),
-            # Create a custom callback to print current learning rate
-            tf.keras.callbacks.LambdaCallback(
-                on_epoch_begin=lambda epoch, logs: print(
-                    f"\nEpoch {epoch+1}: Current learning rate: {classifier.optimizer.learning_rate(classifier.optimizer.iterations).numpy():.8f}"
-                )
-            ),
+            # Custom LR logger
+            LRLogger(),
         ]
 
         # Train the model
         print(f"\nTraining with {len(x_train)} samples, {num_train_steps} steps")
         print(
-            f"Learning rate: initial={lr}, end={end_lr}, warmup_proportion={warmup_proportion}"
+            f"Learning rate: initial={lr}, end={lr * end_lr_factor}, warmup_proportion={warmup_proportion}"
         )
         print(f"Early stopping patience: {patience}, min_delta: {min_delta}")
 
@@ -190,9 +172,6 @@ def finetune(
         # Plot training history if matplotlib is available
         try:
             import matplotlib.pyplot as plt
-
-            # Create the directory if it doesn't exist
-            os.makedirs(os.path.dirname(path), exist_ok=True)
 
             # Plot training & validation F1 score
             plt.figure(figsize=(12, 4))
@@ -223,10 +202,8 @@ def finetune(
             print(
                 f"Training history plot saved to {os.path.join(os.path.dirname(path), 'training_history.png')}"
             )
-        except:
-            print(
-                "Could not create training history plot. Make sure matplotlib is installed."
-            )
+        except Exception as e:
+            print(f"Could not create training history plot: {str(e)}")
 
         del classifier
 
