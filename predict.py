@@ -6,7 +6,6 @@ import numpy as np
 import tensorflow as tf
 
 from scipy import stats
-from pathlib import Path
 from sklearn import metrics
 from sklearn.metrics import roc_auc_score
 
@@ -20,41 +19,6 @@ from model.model_utils import *
 from model.train import compute_loss
 
 from utils import *
-
-
-def collect_metrics(
-    y_true_multiclass,
-    y_pred_multiclass,
-    y_true_binary,
-    y_pred_binary,
-    scores=None,
-    threshold=None,
-):
-    """Collect metrics into a dictionary for easier handling"""
-    metrics_dict = {
-        "multi_class_macro_f1": metrics.f1_score(
-            y_true_multiclass, y_pred_multiclass, average="macro"
-        ),
-        "multi_class_micro_f1": metrics.f1_score(
-            y_true_multiclass, y_pred_multiclass, average="micro"
-        ),
-        "binary_class_macro_f1": metrics.f1_score(
-            y_true_binary, y_pred_binary, average="macro"
-        ),
-        "binary_class_micro_f1": metrics.f1_score(
-            y_true_binary, y_pred_binary, average="micro"
-        ),
-        "threshold": threshold,
-    }
-
-    # Add AUC-ROC if scores are provided
-    if scores is not None:
-        try:
-            metrics_dict["auc_roc"] = metrics.roc_auc_score(y_true_binary, scores)
-        except:
-            metrics_dict["auc_roc"] = 0.5
-
-    return metrics_dict
 
 
 def adaptive_alpha(probs):
@@ -322,11 +286,6 @@ def predict(
 
 
 def run(config):
-    output_dir = config.get("output_dir", f'./artifacts/{config["dataset"]}')
-    path_bert = Path(f"{output_dir}/bert/")
-    path_vae = Path(f"{output_dir}/vae/")
-    path_bert.mkdir(parents=True, exist_ok=True)
-    path_vae.mkdir(parents=True, exist_ok=True)
     print("Loading data from {}...".format(os.path.join("data", config["dataset"])))
     dataloader = DataLoader(path=os.path.join("dataset", config["dataset"]))
     train_sentences, train_intents = dataloader.train_loader()
@@ -395,7 +354,11 @@ def run(config):
 
     print("------------------------------------------------------------------")
 
-    print("Loading bert weights from {}".format(os.path.join(output_dir, "bert/")))
+    print(
+        "Loading bert weights from {}".format(
+            os.path.join("artifacts", config["dataset"], "bert/")
+        )
+    )
     classifier = finetune(
         x_train=train_sentences + dev_sentences,
         y_train=np.concatenate((train_intents_encoded, dev_intents_encoded), axis=0),
@@ -403,13 +366,13 @@ def run(config):
         y_validation=test_intents_encoded,
         max_length=max_length,
         num_labels=len(np.unique(np.array(train_intents))),
-        path=os.path.join(output_dir, "bert/"),
+        path=os.path.join("artifacts", config["dataset"], "bert/"),
         train=False,
         first_layers_to_freeze=11,
         num_epochs=config["finetune_epochs"],
         model_name=config["bert"],
     )
-    classifier.load_weights(os.path.join(output_dir, "bert/"))
+    classifier.load_weights(os.path.join("artifacts", config["dataset"], "bert/"))
     bert.layers[0].set_weights(classifier.layers[0].get_weights())
     print("------------------------------------------------------------------")
 
@@ -435,10 +398,10 @@ def run(config):
     # train_loss_metric = tf.keras.metrics.Mean()
     # val_loss_metric = tf.keras.metrics.Mean()
 
-    model.load_weights(os.path.join(output_dir, "vae", "vae.h5"))
+    model.load_weights(os.path.join("artifacts", config["dataset"], "vae", "vae.h5"))
     print(
         "Model was created successfully and weights were loaded from {}.".format(
-            os.path.join(output_dir, "vae", "vae.h5")
+            os.path.join("artifacts", config["dataset"], "vae", "vae.h5")
         )
     )
 
@@ -470,27 +433,29 @@ def run(config):
 
     # Fix normalization - use proper function
     normalized_dev_loss = normalize(
-        dev_loss, path=os.path.join(output_dir), mode="eval"
+        dev_loss, path=os.path.join("artifacts", config["dataset"]), mode="eval"
     )
     normalized_test_loss = normalize(
-        test_loss, path=os.path.join(output_dir), mode="eval"
+        test_loss, path=os.path.join("artifacts", config["dataset"]), mode="eval"
     )
     normalized_ood_loss = normalize(
-        ood_loss, path=os.path.join(output_dir), mode="eval"
+        ood_loss, path=os.path.join("artifacts", config["dataset"]), mode="eval"
     )
 
     # Visualize test and OOD losses
     visualize(
         normalized_test_loss,
         os.path.join(
-            output_dir,
+            "artifacts",
+            config["dataset"],
             "vae_loss_for_{}_test.png".format(config["dataset"]),
         ),
     )
     visualize(
         normalized_ood_loss,
         os.path.join(
-            output_dir,
+            "artifacts",
+            config["dataset"],
             "vae_loss_for_{}_ood.png".format(config["dataset"]),
         ),
     )
@@ -512,7 +477,7 @@ def run(config):
         )
 
         # Save EVT results
-        evt_path = os.path.join(output_dir, "evt_vae")
+        evt_path = os.path.join("artifacts", config["dataset"], "evt_vae")
         os.makedirs(evt_path, exist_ok=True)
 
         with open(os.path.join(evt_path, "evt_results.pkl"), "wb") as f:
@@ -552,15 +517,6 @@ def run(config):
         # For binary classification (in-domain vs OOD)
         y_true_binary = [0] * len(test_sentences) + [1] * len(ood_sentences)
         y_pred_binary = [0 if loss <= evt_threshold else 1 for loss in eval_losses]
-
-        metrics_dict = collect_metrics(
-            y_true_multiclass,
-            y_pred_multiclass,
-            y_true_binary,
-            y_pred_binary,
-            eval_losses,
-            evt_threshold,
-        )
 
         # Calculate metrics
         print("----------------------------------")
@@ -697,7 +653,7 @@ def run(config):
             thresholds[cls] = threshold
 
         # Save EVT models and thresholds
-        evt_path = os.path.join(output_dir, "evt")
+        evt_path = os.path.join("artifacts", config["dataset"], "evt")
         os.makedirs(evt_path, exist_ok=True)
 
         with open(os.path.join(evt_path, "thresholds.pkl"), "wb") as f:
@@ -766,15 +722,6 @@ def run(config):
             print(
                 f"Adaptive alpha - Average: {np.mean(alphas_used):.4f}, Min: {np.min(alphas_used):.4f}, Max: {np.max(alphas_used):.4f}"
             )
-        
-        metrics_dict = collect_metrics(
-            y_true_multiclass,
-            y_pred_multiclass,
-            y_true_binary,
-            y_pred_binary,
-            eval_losses,
-            evt_threshold,
-        )
 
         print("----------------------------------")
         print(
@@ -807,7 +754,7 @@ def run(config):
         else:
             plt.title(f"Distribution of Ensemble Scores (adaptive alpha)")
         plt.legend()
-        plt.savefig(os.path.join(output_dir, "ensemble_scores.png"))
+        plt.savefig(os.path.join("artifacts", config["dataset"], "ensemble_scores.png"))
 
         # Create comprehensive visualization
         create_analysis_visualizations(
@@ -820,7 +767,7 @@ def run(config):
                 if config.get("ensemble_method", "fixed") == "fixed"
                 else np.mean(alphas_used)
             ),
-            os.path.join(output_dir),
+            os.path.join("artifacts", config["dataset"]),
         )
 
     else:
@@ -848,7 +795,11 @@ def run(config):
         plt.ylabel("Count")
         plt.title("VAE Loss Distribution with Fixed Threshold")
         plt.legend()
-        plt.savefig(os.path.join(output_dir, "vae_losses_fixed_threshold.png"))
+        plt.savefig(
+            os.path.join(
+                "artifacts", config["dataset"], "vae_losses_fixed_threshold.png"
+            )
+        )
 
         # Combine test and OOD data
         eval_loss = np.concatenate([normalized_test_loss, normalized_ood_loss])
@@ -871,15 +822,7 @@ def run(config):
         # For binary classification (in-domain vs OOD)
         y_true_binary = [0] * len(test_sentences) + [1] * len(ood_sentences)
         y_pred_binary = [0 if loss <= fixed_threshold else 1 for loss in eval_loss]
-        
-        metrics_dict = collect_metrics(
-            y_true_multiclass,
-            y_pred_multiclass,
-            y_true_binary,
-            y_pred_binary,
-            eval_losses,
-            evt_threshold,
-        )
+
         # Calculate metrics
         print("----------------------------------")
         print(
@@ -903,7 +846,6 @@ def run(config):
             print("Could not calculate AUC-ROC")
 
     print("------------------------------------------------------------------")
-    return metrics_dict
 
 
 if __name__ == "__main__":
