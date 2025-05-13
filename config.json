@@ -5,7 +5,7 @@
     "latent_dim": 32,
     "seq_length": "max",
     "finetune": true,
-    "finetune_epochs": 60,
+    "finetune_epochs": 80,
     "train_epochs": 100,
     "batch_size": 16,
     "vae_learning_rate": 0.001,
@@ -26,5 +26,6 @@
     "evt_fpr": 0.05,
     "tail_fraction": 0.2,
     "min_tail_size": 30,
-    "fixed_threshold": 0.2
+    "fixed_threshold": 0.2,
+    "random_seeds": [42, 123, 256, 789, 1024]
 }
