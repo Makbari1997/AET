@@ -248,8 +248,10 @@ if __name__ == "__main__":
     config_file = open("./config.json")
     config = json.load(config_file)
 
-    if "seed" in config:
-        set_seeds(config["seed"])
-        print(f"Random seed set to {config['seed']}")
-
-    run(config)
+    seeds = config.get("random_seeds", [42])
+    for seed in seeds:
+        config["seed"] = seed
+        if "seed" in config:
+            set_seeds(config["seed"])
+            print(f"Random seed set to {config['seed']}")
+        run(config)
