@@ -70,6 +70,28 @@ def run(config):
     bert, tokenizer = get_bert(config['bert'])
     print('Download finished successfully!')
 
+    if config.get('use_balanced_sampling', False):
+        print('Creating oversampled dataset for consistent BERT and VAE training...')
+        
+        # Create balanced data generator
+        balanced_generator = BalancedDataGenerator(
+            x=train_sentences,
+            y=train_intents_encoded,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            batch_size=config['batch_size'],
+            model_name=config['bert'],
+            balance_method=config.get('sampling_method', 'oversample'),
+            random_state=config.get('random_state', 42)
+        )
+        stats = balanced_generator.get_oversampled_stats()
+        print(f"Original dataset size: {stats['original_total']}")
+        print(f"Oversampled dataset size: {stats['total_samples']}")
+        print(f"Samples per class: {stats['samples_per_class']}")
+        print(f"Original class distribution: {stats['original_class_counts']}")
+        print(f"Oversampled class distribution: {stats['class_distribution']}")
+        train_sentences, train_intents_encoded = balanced_generator.get_oversampled_data()
+
     print('------------------------------------------------------------------')
 
     print('Preparing data for bert, it may take a few minutes...')
@@ -87,11 +109,42 @@ def run(config):
     print('------------------------------------------------------------------')
 
     print('Finetuning of bert is in progress...')
+    # classifier = finetune(
+    #     x_train=train_sentences + dev_sentences, y_train=np.concatenate((train_intents_encoded, dev_intents_encoded), axis=0),
+    #     x_validation=test_sentences, y_validation=test_intents_encoded,
+    #     max_length=max_length, num_labels=len(np.unique(np.array(train_intents))), path=os.path.join('artifacts', config['dataset'], 'bert/'), 
+    #     train=config['finetune'], first_layers_to_freeze=10, num_epochs=config['finetune_epochs'], model_name=config['bert']
+    # )
     classifier = finetune(
-        x_train=train_sentences + dev_sentences, y_train=np.concatenate((train_intents_encoded, dev_intents_encoded), axis=0),
-        x_validation=test_sentences, y_validation=test_intents_encoded,
-        max_length=max_length, num_labels=len(np.unique(np.array(train_intents))), path=os.path.join('artifacts', config['dataset'], 'bert/'), 
-        train=config['finetune'], first_layers_to_freeze=10, num_epochs=config['finetune_epochs'], model_name=config['bert']
+        x_train=train_sentences + dev_sentences, 
+        y_train=np.concatenate((train_intents_encoded, dev_intents_encoded), axis=0),
+        x_validation=test_sentences, 
+        y_validation=test_intents_encoded,
+        max_length=max_length, 
+        num_labels=len(np.unique(np.array(train_intents))), 
+        path=os.path.join('artifacts', config['dataset'], 'bert/'), 
+        train=config['finetune'], 
+        first_layers_to_freeze=10, 
+        num_epochs=config['finetune_epochs'], 
+        model_name=config['bert'],
+        
+        # New imbalanced dataset parameters from config
+        use_class_weights=config.get('use_class_weights', False),
+        class_weight_method=config.get('class_weight_method', 'balanced'),
+        use_focal_loss=config.get('use_focal_loss', False),
+        focal_alpha=config.get('focal_alpha', 1.0),
+        focal_gamma=config.get('focal_gamma', 2.0),
+        use_balanced_sampling=False,
+        sampling_method=config.get('sampling_method', 'undersample'),
+        use_warmup=config.get('use_warmup', False),
+        warmup_steps=config.get('warmup_steps', None),
+        warmup_initial_lr=config.get('warmup_initial_lr', 1e-6),
+        warmup_strategy=config.get('warmup_strategy', 'linear'),
+        use_lr_schedule=config.get('use_lr_schedule', False),
+        lr_schedule_type=config.get('lr_schedule_type', 'exponential'),
+        lr_decay_steps=config.get('lr_decay_steps', None),
+        lr_decay_rate=config.get('lr_decay_rate', 0.96),
+        random_state=config.get('random_state', 42)
     )
     classifier.load_weights(os.path.join('artifacts', config['dataset'], 'bert/'))
     bert.layers[0].set_weights(classifier.layers[0].get_weights())
