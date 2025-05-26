@@ -91,6 +91,9 @@ def run(config):
         print(f"Original class distribution: {stats['original_class_counts']}")
         print(f"Oversampled class distribution: {stats['class_distribution']}")
         train_sentences, train_intents_encoded = balanced_generator.get_oversampled_data()
+        indices = random.sample(range(len(train_sentences)), int(len(train_sentences) / 2))
+        train_sentences = [train_sentences[i] for i in indices]
+        train_intents_encoded = [train_intents_encoded[i] for i in indices]
 
     print('------------------------------------------------------------------')
 
