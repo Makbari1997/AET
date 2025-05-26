@@ -521,7 +521,7 @@ def finetune(
 
             # Validation data (normal preprocessing)
             dev_data = __finetune_preprocess__(
-                x_validation, y_validation, model_name, batch_size, max_length
+                x_validation, y_validation, model_name, 1, max_length
             )
 
             # Train with generator
@@ -538,7 +538,7 @@ def finetune(
                 x_train, y_train, model_name, batch_size, max_length
             )
             dev_data = __finetune_preprocess__(
-                x_validation, y_validation, model_name, batch_size, max_length
+                x_validation, y_validation, model_name, 1, max_length
             )
 
             # Train with class weights if specified
