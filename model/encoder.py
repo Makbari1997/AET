@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import tensorflow as tf
 from model.metrics import f1_m
@@ -496,7 +497,7 @@ def finetune(
         # Prepare callbacks
         callbacks = [
             tf.keras.callbacks.ModelCheckpoint(
-                filepath=path,
+                filepath=os.path.join(path, "weights.h5"),
                 monitor="val_f1_m",
                 mode="max",
                 save_weights_only=True,
@@ -556,6 +557,6 @@ def finetune(
     classifier = TFAutoModelForSequenceClassification.from_pretrained(
         model_name, num_labels=num_labels
     )
-    classifier.load_weights(path)
+    classifier.load_weights(os.path.join(path, "weights.h5"))
 
     return classifier
