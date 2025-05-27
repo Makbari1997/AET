@@ -372,7 +372,7 @@ def run(config):
         num_epochs=config["finetune_epochs"],
         model_name=config["bert"],
     )
-    classifier.load_weights(os.path.join("artifacts", config["dataset"], "bert/"))
+    classifier.load_weights(os.path.join("artifacts", config["dataset"], "bert/best_model"))
     bert.layers[0].set_weights(classifier.layers[0].get_weights())
     print("------------------------------------------------------------------")
 

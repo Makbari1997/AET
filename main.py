@@ -149,7 +149,7 @@ def run(config):
         lr_decay_rate=config.get('lr_decay_rate', 0.96),
         random_state=config.get('random_state', 42)
     )
-    classifier.load_weights(os.path.join('artifacts', config['dataset'], 'bert/'))
+    classifier.load_weights(os.path.join('artifacts', config['dataset'], 'bert/best_model'))
     bert.layers[0].set_weights(classifier.layers[0].get_weights())
     print('Finetuning finished successfully and weights saved to {}'.format(os.path.join('artifacts', config['dataset'], 'bert/')))
 

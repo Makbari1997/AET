@@ -497,7 +497,7 @@ def finetune(
         # Prepare callbacks
         callbacks = [
             tf.keras.callbacks.ModelCheckpoint(
-                filepath=os.path.join(path, "weights.h5"),
+                filepath=os.path.join(path, "best_model"),
                 monitor="val_f1_m",
                 mode="max",
                 save_weights_only=True,
@@ -557,6 +557,6 @@ def finetune(
     classifier = TFAutoModelForSequenceClassification.from_pretrained(
         model_name, num_labels=num_labels
     )
-    classifier.load_weights(os.path.join(path, "weights.h5"))
+    classifier.load_weights(os.path.join(path, "best_model"))
 
     return classifier
