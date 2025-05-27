@@ -1,0 +1,2 @@
+GetWeather 0
+BookRestaurant 1

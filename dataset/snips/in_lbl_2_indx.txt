@@ -1,0 +1,5 @@
+PlayMusic 0
+RateBook 1
+SearchScreeningEvent 2
+SearchCreativeWork 3
+AddToPlaylist 4
