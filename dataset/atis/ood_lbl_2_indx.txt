@@ -1,0 +1,5 @@
+airline 0
+day_name 1
+airfare 2
+distance 3
+meal 4
