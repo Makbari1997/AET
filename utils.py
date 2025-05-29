@@ -7,6 +7,49 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 
 
+def normalize_safe(data, path, mode="train"):
+    """
+    Normalize data with NaN/Inf handling
+    """
+    # Remove NaN and Inf values
+    data_clean = np.array(data)
+    mask = np.isfinite(data_clean)
+
+    if not np.any(mask):
+        print("ERROR: All data values are NaN or Inf!")
+        return np.ones_like(data) * 0.5  # Return middle value
+
+    if mode == "train":
+        # Fit scaler only on finite values
+        scaler = MinMaxScaler()
+        finite_data = data_clean[mask].reshape(-1, 1)
+        scaler.fit(finite_data)
+
+        # Save scaler
+        with open(os.path.join(path, "scaler.pickle"), "wb") as handle:
+            pickle.dump(scaler, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Transform all data, replacing non-finite with max value
+        normalized = np.zeros_like(data_clean)
+        normalized[mask] = scaler.transform(data_clean[mask].reshape(-1, 1)).flatten()
+        normalized[~mask] = 1.0  # Set non-finite to max normalized value
+
+        return normalized
+
+    elif mode == "eval":
+        with open(os.path.join(path, "scaler.pickle"), "rb") as handle:
+            scaler = pickle.load(handle)
+
+        # Transform, handling non-finite values
+        normalized = np.zeros_like(data_clean)
+        normalized[mask] = scaler.transform(data_clean[mask].reshape(-1, 1)).flatten()
+        normalized[~mask] = 1.0  # Set non-finite to max normalized value
+
+        return normalized
+    else:
+        raise ValueError("mode parameter can only take eval or train as its values")
+
+
 def visualize(data, path):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
     _ = ax1.hist(data, bins="auto", cumulative=True)
@@ -158,7 +201,8 @@ def evt_vae_only(
     # Apply the threshold for binary classification
     y_true_binary = [0] * len(test_losses) + [1] * len(ood_losses)
     y_pred_binary = [
-        0 if loss <= evt_threshold else 1 for loss in np.concatenate([test_losses, ood_losses])
+        0 if loss <= evt_threshold else 1
+        for loss in np.concatenate([test_losses, ood_losses])
     ]
 
     # Calculate metrics
@@ -176,7 +220,8 @@ def evt_vae_only(
 
     for threshold in np.arange(0.05, 1.0, 0.05):
         y_pred_fixed = [
-            0 if loss <= threshold else 1 for loss in np.concatenate([test_losses, ood_losses])
+            0 if loss <= threshold else 1
+            for loss in np.concatenate([test_losses, ood_losses])
         ]
         f1 = metrics.f1_score(y_true_binary, y_pred_fixed, average="macro")
 
@@ -186,7 +231,8 @@ def evt_vae_only(
 
     # Results with best fixed threshold
     y_pred_best_fixed = [
-        0 if loss <= best_threshold else 1 for loss in np.concatenate([test_losses,ood_losses])
+        0 if loss <= best_threshold else 1
+        for loss in np.concatenate([test_losses, ood_losses])
     ]
     fixed_f1_macro = metrics.f1_score(y_true_binary, y_pred_best_fixed, average="macro")
     fixed_f1_micro = metrics.f1_score(y_true_binary, y_pred_best_fixed, average="micro")

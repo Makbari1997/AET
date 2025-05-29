@@ -16,9 +16,52 @@ from data_modules.dataloader import DataLoader
 from model.vae import *
 from model.encoder import *
 from model.model_utils import *
-from model.train import compute_loss
+
+# from model.train import compute_loss_safe
 
 from utils import *
+
+
+def compute_loss_safe(model, data):
+    """
+    Compute loss with NaN/Inf checking and handling
+    """
+    losses = []
+    skipped_count = 0
+
+    for step, (x, y, z) in enumerate(data):
+        try:
+            # Compute loss
+            logits = model([x, y, z], training=False)
+            loss_value = model.losses
+
+            if isinstance(loss_value, list):
+                loss_value = loss_value[0]
+
+            loss_numpy = loss_value.numpy()
+
+            # Check for NaN or Inf
+            if np.isnan(loss_numpy) or np.isinf(loss_numpy):
+                print(f"Warning: NaN/Inf loss detected at step {step}, skipping")
+                skipped_count += 1
+                continue
+
+            losses.append(loss_numpy)
+
+        except Exception as e:
+            print(f"Error computing loss at step {step}: {e}")
+            skipped_count += 1
+            continue
+
+    if len(losses) == 0:
+        print("ERROR: All losses were invalid!")
+        # Return a default high loss value instead of empty array
+        return np.array([10.0])  # High loss indicates anomaly
+
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} samples due to invalid losses")
+
+    return np.array(losses)
 
 
 def adaptive_alpha(probs):
@@ -198,6 +241,112 @@ def fit_evt_models(
     return thresholds, evt_models
 
 
+def fit_evt_models_robust(
+    classifier,
+    tokenizer,
+    losses,
+    sentences,
+    true_classes,
+    max_length,
+    fpr=0.05,
+    contamination_ratio=0.05,
+):
+    """
+    Fit EVT models with outlier detection and robustness improvements
+    """
+    # Group validation samples by class
+    class_to_samples = {}
+
+    for i, (loss, sen, cls) in enumerate(zip(losses, sentences, true_classes)):
+        # Skip invalid losses
+        if np.isnan(loss) or np.isinf(loss):
+            continue
+
+        # Get classifier output
+        inputs = __predict_preprocess__(sen, tokenizer, max_length)
+        logits = classifier.predict(inputs)[0]
+        probs = tf.nn.softmax(logits, axis=1).numpy()[0]
+
+        # Get maximum probability
+        max_prob = np.max(probs)
+
+        # Calculate ensemble score with alpha=0.5
+        ood_score = 0.5 * (1 - max_prob) + 0.5 * loss
+
+        # Skip invalid scores
+        if np.isnan(ood_score) or np.isinf(ood_score):
+            continue
+
+        if cls not in class_to_samples:
+            class_to_samples[cls] = []
+
+        class_to_samples[cls].append(ood_score)
+
+    # Fit EVT models for each class with outlier removal
+    evt_models = {}
+    thresholds = {}
+
+    for cls, scores in class_to_samples.items():
+        if len(scores) < 10:  # Need minimum samples
+            print(
+                f"Warning: Class {cls} has only {len(scores)} samples, using percentile threshold"
+            )
+            thresholds[cls] = np.percentile(scores, 95)
+            continue
+
+        scores_array = np.array(scores)
+
+        # Remove outliers using IQR method
+        q1 = np.percentile(scores_array, 25)
+        q3 = np.percentile(scores_array, 75)
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+
+        # Keep only scores within bounds
+        scores_clean = scores_array[
+            (scores_array >= lower_bound) & (scores_array <= upper_bound)
+        ]
+
+        if len(scores_clean) < 5:
+            print(f"Warning: Too few samples after outlier removal for class {cls}")
+            thresholds[cls] = np.percentile(scores_array, 95)
+            continue
+
+        try:
+            # Fit GEV distribution on clean data
+            shape, loc, scale = stats.genextreme.fit(-scores_clean)
+
+            # Check if parameters are reasonable
+            if abs(shape) > 2 or scale <= 0 or scale > 10:
+                print(
+                    f"Warning: Unreasonable EVT parameters for class {cls}, using percentile"
+                )
+                thresholds[cls] = np.percentile(scores_clean, 100 * (1 - fpr))
+            else:
+                evt_models[cls] = (shape, loc, scale)
+                # Calculate threshold based on desired FPR
+                threshold = -stats.genextreme.ppf(1 - fpr, shape, loc, scale)
+
+                # Sanity check threshold
+                if (
+                    threshold < np.min(scores_clean)
+                    or threshold > np.max(scores_array) * 2
+                ):
+                    print(
+                        f"Warning: EVT threshold out of range for class {cls}, using percentile"
+                    )
+                    threshold = np.percentile(scores_clean, 100 * (1 - fpr))
+
+                thresholds[cls] = threshold
+
+        except Exception as e:
+            print(f"Error fitting EVT for class {cls}: {e}, using percentile")
+            thresholds[cls] = np.percentile(scores_clean, 100 * (1 - fpr))
+
+    return thresholds, evt_models
+
+
 def find_optimal_alpha(
     classifier,
     tokenizer,
@@ -372,7 +521,9 @@ def run(config):
         num_epochs=config["finetune_epochs"],
         model_name=config["bert"],
     )
-    classifier.load_weights(os.path.join("artifacts", config["dataset"], "bert/best_model"))
+    classifier.load_weights(
+        os.path.join("artifacts", config["dataset"], "bert/best_model")
+    )
     bert.layers[0].set_weights(classifier.layers[0].get_weights())
     print("------------------------------------------------------------------")
 
@@ -408,6 +559,12 @@ def run(config):
     print("------------------------------------------------------------------")
 
     # Calculate losses for dev, test, and ood sets
+    train_tf = to_tf_format(
+        (train_input_ids, train_attention_mask, train_token_type_ids),
+        None,
+        len(train_sentences),
+        batch_size=1,
+    )
     dev_tf = to_tf_format(
         (dev_input_ids, dev_attention_mask, dev_token_type_ids),
         None,
@@ -427,11 +584,15 @@ def run(config):
         batch_size=1,
     )
 
-    dev_loss = compute_loss(model, dev_tf)
-    test_loss = compute_loss(model, test_tf)
-    ood_loss = compute_loss(model, ood_tf)
+    train_loss = compute_loss_safe(model, train_tf)
+    dev_loss = compute_loss_safe(model, dev_tf)
+    test_loss = compute_loss_safe(model, test_tf)
+    ood_loss = compute_loss_safe(model, ood_tf)
 
     # Fix normalization - use proper function
+    normalized_train_loss = normalize(
+        train_loss, path=os.path.join("artifacts", config["dataset"]), mode="train"
+    )
     normalized_dev_loss = normalize(
         dev_loss, path=os.path.join("artifacts", config["dataset"]), mode="eval"
     )
@@ -441,7 +602,7 @@ def run(config):
     normalized_ood_loss = normalize(
         ood_loss, path=os.path.join("artifacts", config["dataset"]), mode="eval"
     )
-
+    print(test_loss)
     # Visualize test and OOD losses
     visualize(
         normalized_test_loss,
@@ -469,8 +630,11 @@ def run(config):
         # Apply EVT to VAE losses
         evt_results = evt_vae_only(
             normalized_dev_loss,
+            # dev_loss,
             normalized_test_loss,
+            # test_loss,
             normalized_ood_loss,
+            # ood_loss,
             desired_fpr=config.get("evt_fpr", 0.05),
             tail_fraction=config.get("tail_fraction", 0.2),
             min_tail_size=config.get("min_tail_size", 30),
@@ -498,6 +662,7 @@ def run(config):
 
         # Evaluate on test and OOD data
         eval_losses = np.concatenate([normalized_test_loss, normalized_ood_loss])
+        # eval_losses = np.concatenate([test_loss, ood_loss])
         eval_sentences = test_sentences + ood_sentences
 
         # Make predictions using VAE loss threshold
