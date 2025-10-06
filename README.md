@@ -1,6 +1,8 @@
 # Adaptive Ensemble Thresholding for OOD Intent Detection
 Official implementation of "Adaptive Ensemble Thresholding for OOD Intent Detection".
+
 URL: https://ijwr.usc.ac.ir/article_231079.html
+-------------------------------
 To cite:
 ```
 @article {
